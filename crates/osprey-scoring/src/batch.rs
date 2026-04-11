@@ -1454,6 +1454,9 @@ pub fn sample_library_for_calibration(
 ) -> Vec<LibraryEntry> {
     use std::collections::HashSet;
 
+    let dump_sample = std::env::var("OSPREY_DUMP_CAL_SAMPLE").is_ok();
+    let abort_after = std::env::var("OSPREY_CAL_SAMPLE_ONLY").is_ok();
+
     if sample_size == 0 {
         return library.to_vec();
     }
@@ -1513,6 +1516,44 @@ pub fn sample_library_for_calibration(
         1
     };
     let per_cell = per_cell.max(1);
+
+    if dump_sample {
+        use std::io::Write;
+        // Dump scalar parameters
+        if let Ok(mut f) = std::fs::File::create("rust_cal_scalars.txt") {
+            writeln!(f, "n_targets\t{}", targets.len()).ok();
+            writeln!(f, "n_decoys\t{}", decoys.len()).ok();
+            writeln!(f, "bins_per_axis\t{}", bins_per_axis).ok();
+            writeln!(f, "rt_min\t{:.17}", rt_min).ok();
+            writeln!(f, "rt_max\t{:.17}", rt_max).ok();
+            writeln!(f, "mz_min\t{:.17}", mz_min).ok();
+            writeln!(f, "mz_max\t{:.17}", mz_max).ok();
+            writeln!(f, "rt_range\t{:.17}", rt_range).ok();
+            writeln!(f, "mz_range\t{:.17}", mz_range).ok();
+            writeln!(f, "rt_bin_width\t{:.17}", rt_bin_width).ok();
+            writeln!(f, "mz_bin_width\t{:.17}", mz_bin_width).ok();
+            writeln!(f, "n_occupied\t{}", n_occupied).ok();
+            writeln!(f, "per_cell\t{}", per_cell).ok();
+            writeln!(f, "seed\t{}", seed).ok();
+        }
+        // Dump full grid: rt_bin, mz_bin, count, target_ids (sorted ascending within cell,
+        // to make comparison order-independent)
+        if let Ok(mut f) = std::fs::File::create("rust_cal_grid.txt") {
+            writeln!(f, "rt_bin\tmz_bin\tcount\ttarget_ids").ok();
+            for r in 0..bins_per_axis {
+                for c in 0..bins_per_axis {
+                    let cell = &grid[r][c];
+                    if cell.is_empty() {
+                        continue;
+                    }
+                    let mut ids: Vec<u32> = cell.iter().map(|&i| targets[i].id).collect();
+                    ids.sort();
+                    let ids_str: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+                    writeln!(f, "{}\t{}\t{}\t{}", r, c, cell.len(), ids_str.join(",")).ok();
+                }
+            }
+        }
+    }
 
     // Deterministic stride sampling from each cell
     let offset = seed as usize;
@@ -1591,6 +1632,34 @@ pub fn sample_library_for_calibration(
         bins_per_axis,
         n_occupied,
     );
+
+    if dump_sample {
+        use std::io::Write;
+        let dump_path = "rust_cal_sample.txt";
+        if let Ok(mut f) = std::fs::File::create(dump_path) {
+            let mut tuples: Vec<String> = sampled
+                .iter()
+                .filter(|e| !e.is_decoy)
+                .map(|e| {
+                    format!(
+                        "{}\t{}\t{}\t{:.4}\t{:.4}",
+                        e.id, e.modified_sequence, e.charge, e.precursor_mz, e.retention_time
+                    )
+                })
+                .collect();
+            tuples.sort();
+            writeln!(f, "id\tmodseq\tcharge\tmz\trt").ok();
+            for t in &tuples {
+                writeln!(f, "{}", t).ok();
+            }
+            log::info!("Wrote calibration sample to {} ({} targets)", dump_path, tuples.len());
+        }
+
+        if abort_after {
+            log::info!("OSPREY_CAL_SAMPLE_ONLY set - aborting after sample dump");
+            std::process::exit(0);
+        }
+    }
 
     sampled
 }
@@ -2060,15 +2129,17 @@ pub fn run_xcorr_calibration_scoring<M: MS1SpectrumLookup>(
                 }
 
                 // === BATCH XCORR PREPROCESSING (pyXcorrDIA approach) ===
-                // Preprocess all spectra for XCorr ONCE per window (uses f32 for memory efficiency)
+                // Preprocess all spectra for XCorr ONCE per window.
+                // Uses f64 throughout to match C#'s natural double precision
+                // so the xcorr scores are bit-identical across implementations.
                 // Spectra are shared across many library entries, so upfront preprocessing is efficient
-                let spec_xcorr_preprocessed: Vec<Vec<f32>> = window_spectra
+                let spec_xcorr_preprocessed: Vec<Vec<f64>> = window_spectra
                     .iter()
                     .map(|spec| xcorr_scorer.preprocess_spectrum_for_xcorr(spec))
                     .collect();
 
                 // NOTE: Library entries are preprocessed lazily (only after passing RT + topN filters)
-                // This avoids wasting ~8KB per entry for entries that never get scored
+                // This avoids wasting ~16KB per entry for entries that never get scored
 
                 // Score each library entry against all spectra in this window
                 let mut window_matches: Vec<CalibrationMatch> = Vec::new();
@@ -2243,15 +2314,15 @@ pub fn run_xcorr_calibration_scoring<M: MS1SpectrumLookup>(
                 }
 
                 // === BATCH XCORR PREPROCESSING (pyXcorrDIA approach) ===
-                // Preprocess all spectra for XCorr ONCE per window (uses f32 for memory efficiency)
-                // Spectra are shared across many library entries, so upfront preprocessing is efficient
-                let spec_xcorr_preprocessed: Vec<Vec<f32>> = window_spectra
+                // Preprocess all spectra for XCorr ONCE per window. Uses f64
+                // for cross-implementation bit-identical alignment with C#.
+                let spec_xcorr_preprocessed: Vec<Vec<f64>> = window_spectra
                     .iter()
                     .map(|spec| xcorr_scorer.preprocess_spectrum_for_xcorr(spec))
                     .collect();
 
                 // NOTE: Library entries are preprocessed lazily (only after passing RT + topN filters)
-                // This avoids wasting ~8KB per entry for entries that never get scored
+                // This avoids wasting ~16KB per entry for entries that never get scored
 
                 let mut window_matches: Vec<CalibrationMatch> = Vec::new();
 
@@ -2464,6 +2535,10 @@ pub fn run_coelution_calibration_scoring<M: MS1SpectrumLookup>(
     rt_tolerance: f64,
     expected_rt_fn: Option<&(dyn Fn(f64) -> f64 + Sync)>,
     xcorr_scorer: Option<&SpectralScorer>,
+    // Scratch diagnostic only: RTCalibration used to fit expected_rt_fn. Passed
+    // so the per-entry XIC dump can emit the LOESS stats alongside the
+    // predicted expected_rt and tolerance. None for pass 1, Some on pass 2.
+    rt_calibration_for_diag: Option<&osprey_chromatography::RTCalibration>,
 ) -> Vec<CalibrationMatch> {
     // Group spectra by isolation window
     let window_groups = group_spectra_by_isolation_window(spectra);
@@ -2509,6 +2584,26 @@ pub fn run_coelution_calibration_scoring<M: MS1SpectrumLookup>(
             .progress_chars("#>-"),
     );
 
+    // Per-entry chromatogram diagnostic. OSPREY_DIAG_XIC_ENTRY_ID specifies
+    // which entry id to dump in detail (post-prefilter candidates + per-fragment
+    // extracted XIC values). Used to prove that two implementations extract
+    // identical chromatograms BEFORE comparing peak picking or feature scores.
+    //
+    // OSPREY_DIAG_XIC_PASS selects which calibration pass to dump on
+    // (default: 1). Pass 1 uses the linear pre-fit RT mapping; pass 2 uses
+    // the LOESS-fitted RTCalibration. We default to pass 1 because the
+    // cross-tool bisection walks downstream: until pass 1 chromatograms match,
+    // there's no point comparing pass 2 (which depends on pass 1's LOESS fit).
+    let diag_xic_entry_id: Option<u32> = std::env::var("OSPREY_DIAG_XIC_ENTRY_ID")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok());
+    let diag_xic_pass: u32 = std::env::var("OSPREY_DIAG_XIC_PASS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(1);
+    let current_pass: u32 = if expected_rt_fn.is_some() { 2 } else { 1 };
+    let diag_xic_active = current_pass == diag_xic_pass;
+
     // Inner function: score one library entry using fragment co-elution
     // Returns Option<CalibrationMatch>
     let score_entry = |entry: &LibraryEntry,
@@ -2519,9 +2614,103 @@ pub fn run_coelution_calibration_scoring<M: MS1SpectrumLookup>(
             return None;
         }
 
+        // Per-entry chromatogram dump (only for the chosen entry id AND
+        // only on the pass selected by OSPREY_DIAG_XIC_PASS — default pass 1).
+        if diag_xic_active && diag_xic_entry_id == Some(entry.id) {
+            use std::io::Write;
+            let dump_path = format!("rust_xic_entry_{}.txt", entry.id);
+            if let Ok(mut f) = std::fs::File::create(&dump_path) {
+                writeln!(f, "# per-entry chromatogram dump for entry_id={} (pass {})",
+                    entry.id, current_pass).ok();
+                writeln!(f, "# {} ({}, charge={}, lib_rt={:.10}, mz={:.10})",
+                    entry.modified_sequence, entry.sequence, entry.charge,
+                    entry.retention_time, entry.precursor_mz).ok();
+
+                // Pass 2 calculations block: dump the inputs that feed into XIC
+                // extraction so if the XICs don't match, we already have the
+                // intermediate values to localize the divergence (LOESS model
+                // stats, predicted RT, refined tolerance, selection window).
+                if let Some(rt_cal) = rt_calibration_for_diag {
+                    let loess_stats = rt_cal.stats();
+                    writeln!(f, "# LOESS MODEL (pass 2 RT calibration)").ok();
+                    writeln!(f, "# loess.n_points={}", loess_stats.n_points).ok();
+                    writeln!(f, "# loess.r_squared={:.10}", loess_stats.r_squared).ok();
+                    writeln!(f, "# loess.residual_sd={:.10}", loess_stats.residual_std).ok();
+                    writeln!(f, "# loess.mean_residual={:.10}", loess_stats.mean_residual).ok();
+                    writeln!(f, "# loess.max_residual={:.10}", loess_stats.max_residual).ok();
+                    writeln!(f, "# loess.p20_abs_residual={:.10}", loess_stats.p20_abs_residual).ok();
+                    writeln!(f, "# loess.p80_abs_residual={:.10}", loess_stats.p80_abs_residual).ok();
+                    writeln!(f, "# loess.mad={:.10}", loess_stats.mad).ok();
+                }
+                // Compute the predicted expected_rt + rt window exactly as
+                // the filter uses them below (identity mapping in pass 1 when
+                // expected_rt_fn is None; LOESS prediction in pass 2).
+                let dump_expected_rt = match expected_rt_fn {
+                    Some(pf) => pf(entry.retention_time),
+                    None => entry.retention_time,
+                };
+                writeln!(f, "# PASS CALCULATIONS").ok();
+                writeln!(f, "# pass.library_rt={:.10}", entry.retention_time).ok();
+                writeln!(f, "# pass.expected_rt={:.10}", dump_expected_rt).ok();
+                writeln!(f, "# pass.tolerance={:.10}", rt_tolerance).ok();
+                writeln!(f, "# pass.rt_window_lo={:.10}", dump_expected_rt - rt_tolerance).ok();
+                writeln!(f, "# pass.rt_window_hi={:.10}", dump_expected_rt + rt_tolerance).ok();
+                // Rust's pipeline uses an identity linear mapping (slope=1,
+                // intercept=0) when ranges are similar. We emit these so the
+                // diff column-for-column matches the C# header layout.
+                writeln!(f, "# pass.rt_slope={:.10}", 1.0_f64).ok();
+                writeln!(f, "# pass.rt_intercept={:.10}", 0.0_f64).ok();
+
+                writeln!(f, "# n_post_prefilter_candidates={}", candidate_spectra.len()).ok();
+                writeln!(f, "# CANDIDATES (post-prefilter, sorted by RT)").ok();
+                writeln!(f, "candidate\tscan_idx\tscan_number\trt").ok();
+                for (i, s) in candidate_spectra.iter().enumerate() {
+                    writeln!(f, "candidate\t{}\t{}\t{:.10}", i, s.scan_number, s.retention_time).ok();
+                }
+                // Also list top-6 fragments with their m/z so the diff is interpretable.
+                let top_indices = super::get_top_n_fragment_indices(&entry.fragments, 6);
+                writeln!(f, "# TOP-6 FRAGMENTS (selected by intensity desc)").ok();
+                writeln!(f, "topfrag\ttop_idx\tlib_idx\tlib_mz\tlib_intensity").ok();
+                for (rank, &fi) in top_indices.iter().enumerate() {
+                    let f_obj = &entry.fragments[fi];
+                    writeln!(f, "topfrag\t{}\t{}\t{:.10}\t{:.10}",
+                        rank, fi, f_obj.mz, f_obj.relative_intensity).ok();
+                }
+            }
+        }
+
         // Extract XICs for top 6 fragments
         let xics =
             super::extract_fragment_xics(&entry.fragments, candidate_spectra, tol_da, tol_ppm, 6);
+
+        // Per-entry chromatogram dump: write the extracted XIC values, then
+        // hard-exit the process so we don't wait for the remaining ~200K
+        // entries (or pass 2, or the downstream pipeline). The only thing
+        // we care about in diagnostic mode is the rust_xic_entry_<id>.txt
+        // content.
+        if diag_xic_active && diag_xic_entry_id == Some(entry.id) {
+            use std::io::Write;
+            let dump_path = format!("rust_xic_entry_{}.txt", entry.id);
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&dump_path) {
+                writeln!(f, "# EXTRACTED XICS (lib_idx, scan_idx, rt, intensity)").ok();
+                writeln!(f, "xic\tlib_idx\tscan_idx\trt\tintensity").ok();
+                // Use 10 decimal places — wide enough that half-way rounding
+                // on values like 1756.6640625 (exact f32 mantissa) doesn't
+                // produce text diffs from banker's-vs-half-up rounding
+                // mode differences between Rust and C#.
+                for (lib_idx, xic) in &xics {
+                    for (i, (rt, intensity)) in xic.iter().enumerate() {
+                        writeln!(f, "xic\t{}\t{}\t{:.10}\t{:.10}",
+                            lib_idx, i, rt, intensity).ok();
+                    }
+                }
+            }
+            log::info!(
+                "[BISECT] OSPREY_DIAG_XIC_ENTRY_ID matched on pass {} - wrote {} and exiting",
+                current_pass, dump_path
+            );
+            std::process::exit(0);
+        }
 
         if xics.len() < 2 {
             return None; // Need at least 2 fragment XICs for co-elution
@@ -2748,6 +2937,29 @@ pub fn run_coelution_calibration_scoring<M: MS1SpectrumLookup>(
         })
     };
 
+    // Diagnostic: collect per-entry m/z and RT window assignments for cross-tool diff.
+    // Each (entry, window) pair gets one row. An entry that falls in multiple
+    // overlapping isolation windows gets multiple rows.
+    let dump_windows = std::env::var("OSPREY_DUMP_CAL_WINDOWS").is_ok();
+    let abort_after_windows = std::env::var("OSPREY_CAL_WINDOWS_ONLY").is_ok();
+    let window_dump = if dump_windows {
+        Some(std::sync::Mutex::new(Vec::<String>::with_capacity(library.len() * 2)))
+    } else {
+        None
+    };
+    let window_dump_ref = window_dump.as_ref();
+
+    // Diagnostic: collect per-entry prefilter results (which spectra survive
+    // RT + 2-of-top-6 fragment match). One row per (entry, window) pair.
+    let dump_prefilter = std::env::var("OSPREY_DUMP_CAL_PREFILTER").is_ok();
+    let abort_after_prefilter = std::env::var("OSPREY_CAL_PREFILTER_ONLY").is_ok();
+    let prefilter_dump = if dump_prefilter {
+        Some(std::sync::Mutex::new(Vec::<String>::with_capacity(library.len() * 2)))
+    } else {
+        None
+    };
+    let prefilter_dump_ref = prefilter_dump.as_ref();
+
     // Process each window in parallel
     let all_matches: Vec<CalibrationMatch> = window_groups
         .par_iter()
@@ -2759,6 +2971,35 @@ pub fn run_coelution_calibration_scoring<M: MS1SpectrumLookup>(
 
             if window_entries.is_empty() {
                 return Vec::new();
+            }
+
+            // Diagnostic: record one row per (entry, window) pair BEFORE filtering.
+            if let Some(mtx) = window_dump_ref {
+                let mut local_rows: Vec<String> = Vec::with_capacity(window_entries.len());
+                for entry in &window_entries {
+                    let expected_rt = match expected_rt_fn {
+                        Some(f) => f(entry.retention_time),
+                        None => entry.retention_time,
+                    };
+                    let rt_lo = expected_rt - rt_tolerance;
+                    let rt_hi = expected_rt + rt_tolerance;
+                    local_rows.push(format!(
+                        "{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}",
+                        entry.id,
+                        if entry.is_decoy { 1 } else { 0 },
+                        entry.charge,
+                        entry.precursor_mz,
+                        entry.retention_time,
+                        lower,
+                        upper,
+                        expected_rt,
+                        rt_lo,
+                        rt_hi,
+                    ));
+                }
+                if let Ok(mut g) = mtx.lock() {
+                    g.extend(local_rows);
+                }
             }
 
             let window_spectra: Vec<&Spectrum> =
@@ -2793,6 +3034,34 @@ pub fn run_coelution_calibration_scoring<M: MS1SpectrumLookup>(
                     })
                     .map(|(idx, spec)| (idx, *spec))
                     .collect();
+
+                // Diagnostic: record per-entry prefilter result before any
+                // additional logic. Even if candidate_pairs is empty, we want
+                // to record n=0 so the dump has one row per (entry, window).
+                if let Some(mtx) = prefilter_dump_ref {
+                    let mut scans: Vec<u32> = candidate_pairs
+                        .iter()
+                        .map(|(_, s)| s.scan_number)
+                        .collect();
+                    scans.sort();
+                    let scans_str = scans
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let row = format!(
+                        "{}\t{}\t{}\t{:.6}\t{}\t{}",
+                        entry.id,
+                        if entry.is_decoy { 1 } else { 0 },
+                        entry.charge,
+                        entry.precursor_mz,
+                        scans.len(),
+                        scans_str
+                    );
+                    if let Ok(mut g) = mtx.lock() {
+                        g.push(row);
+                    }
+                }
 
                 if candidate_pairs.is_empty() {
                     pb.inc(1);
@@ -2857,6 +3126,129 @@ pub fn run_coelution_calibration_scoring<M: MS1SpectrumLookup>(
         targets,
         decoys
     );
+
+    // Write per-entry window dump and exit early if requested.
+    if let Some(mtx) = window_dump {
+        use std::io::Write;
+        let mut rows = mtx.into_inner().unwrap_or_default();
+        rows.sort();
+        if let Ok(mut f) = std::fs::File::create("rust_cal_windows.txt") {
+            writeln!(
+                f,
+                "entry_id\tis_decoy\tcharge\tprecursor_mz\tlibrary_rt\tiso_lower\tiso_upper\texpected_rt\trt_window_start\trt_window_end"
+            ).ok();
+            for r in &rows {
+                writeln!(f, "{}", r).ok();
+            }
+            log::info!("Wrote calibration windows dump: rust_cal_windows.txt ({} rows)", rows.len());
+        }
+        if abort_after_windows {
+            log::info!("OSPREY_CAL_WINDOWS_ONLY set - aborting after window dump");
+            std::process::exit(0);
+        }
+    }
+
+    // Write per-entry prefilter dump and exit early if requested.
+    if let Some(mtx) = prefilter_dump {
+        use std::io::Write;
+        let mut rows = mtx.into_inner().unwrap_or_default();
+        rows.sort();
+        if let Ok(mut f) = std::fs::File::create("rust_cal_prefilter.txt") {
+            writeln!(
+                f,
+                "entry_id\tis_decoy\tcharge\tprecursor_mz\tn_candidates\tscan_numbers"
+            )
+            .ok();
+            for r in &rows {
+                writeln!(f, "{}", r).ok();
+            }
+            log::info!(
+                "Wrote calibration prefilter dump: rust_cal_prefilter.txt ({} rows)",
+                rows.len()
+            );
+        }
+        if abort_after_prefilter {
+            log::info!("OSPREY_CAL_PREFILTER_ONLY set - aborting after prefilter dump");
+            std::process::exit(0);
+        }
+    }
+
+    // Cross-implementation diagnostic: dump per-entry calibration match info.
+    // Controlled by OSPREY_DUMP_CAL_MATCH env var. Writes a TSV row per library
+    // entry (target or decoy), with match status (0/1), apex scan number if
+    // matched, and the four LDA features (correlation, libcosine, top6, xcorr).
+    // Sorted by entry_id for stable diff with C#.
+    if std::env::var("OSPREY_DUMP_CAL_MATCH").is_ok() {
+        use std::io::Write;
+        let dump_path = "rust_cal_match.txt";
+
+        // Build match lookup keyed by entry_id
+        let mut by_id: std::collections::HashMap<u32, &CalibrationMatch> = std::collections::HashMap::new();
+        for m in &results {
+            by_id.insert(m.entry_id, m);
+        }
+
+        if let Ok(mut f) = std::fs::File::create(dump_path) {
+            // 11 columns. snr is the signal-to-noise the S/N filter gates on
+            // (matches entering LOESS must have snr >= MIN_SNR_FOR_RT_CAL=5.0).
+            // scan column intentionally left blank by C#; Rust populates it.
+            writeln!(
+                f,
+                "entry_id\tis_decoy\tcharge\thas_match\tscan\tapex_rt\tcorrelation\tlibcosine\ttop6\txcorr\tsnr"
+            )
+            .ok();
+
+            let mut entries: Vec<&LibraryEntry> = library.iter().collect();
+            entries.sort_by_key(|e| e.id);
+
+            let mut n_matched = 0usize;
+            let mut n_unmatched = 0usize;
+
+            for entry in entries {
+                if let Some(m) = by_id.get(&entry.id) {
+                    // Use :.10 everywhere so we don't hit banker's vs round-
+                    // half-up rounding differences between Rust and C#.
+                    writeln!(
+                        f,
+                        "{}\t{}\t{}\t1\t{}\t{:.10}\t{:.10}\t{:.10}\t{}\t{:.10}\t{:.10}",
+                        entry.id,
+                        if entry.is_decoy { 1 } else { 0 },
+                        entry.charge,
+                        m.scan_number,
+                        m.measured_rt,
+                        m.correlation_score,
+                        m.libcosine_apex,
+                        m.top6_matched_apex,
+                        m.xcorr_score,
+                        m.signal_to_noise
+                    )
+                    .ok();
+                    n_matched += 1;
+                } else {
+                    writeln!(
+                        f,
+                        "{}\t{}\t{}\t0\t\t\t\t\t\t\t",
+                        entry.id,
+                        if entry.is_decoy { 1 } else { 0 },
+                        entry.charge
+                    )
+                    .ok();
+                    n_unmatched += 1;
+                }
+            }
+            log::info!(
+                "Wrote calibration match dump: {} ({} matched, {} unmatched)",
+                dump_path,
+                n_matched,
+                n_unmatched
+            );
+        }
+
+        if std::env::var("OSPREY_CAL_MATCH_ONLY").is_ok() {
+            log::info!("OSPREY_CAL_MATCH_ONLY set - aborting after match dump");
+            std::process::exit(0);
+        }
+    }
 
     results
 }

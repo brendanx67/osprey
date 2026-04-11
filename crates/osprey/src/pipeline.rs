@@ -469,6 +469,7 @@ fn run_calibration_discovery_windowed(
                 initial_tolerance,
                 None, // First pass: use library RT directly
                 Some(&xcorr_scorer),
+                None, // No LOESS model yet (pass 1)
             )
         } else {
             run_coelution_calibration_scoring::<MS1IndexWrapper>(
@@ -480,6 +481,7 @@ fn run_calibration_discovery_windowed(
                 initial_tolerance,
                 None, // First pass: use library RT directly
                 Some(&xcorr_scorer),
+                None, // No LOESS model yet (pass 1)
             )
         };
 
@@ -747,6 +749,7 @@ fn run_calibration_discovery_windowed(
                     pass1_tolerance,
                     Some(&predict_fn),
                     Some(&xcorr_scorer),
+                    Some(&rt_calibration), // Pass 2: LOESS model for diag dump
                 )
             } else {
                 run_coelution_calibration_scoring::<MS1IndexWrapper>(
@@ -758,6 +761,7 @@ fn run_calibration_discovery_windowed(
                     pass1_tolerance,
                     Some(&predict_fn),
                     Some(&xcorr_scorer),
+                    Some(&rt_calibration), // Pass 2: LOESS model for diag dump
                 )
             };
 
@@ -5096,7 +5100,8 @@ struct FeatureComputeContext<'a> {
     /// Pre-preprocessed XCorr vectors for all spectra in the isolation window.
     /// Indexed by position in window_spectra (same order as window_pairs).
     /// When Some, enables O(n_frags) XCorr lookup instead of O(n_peaks) preprocessing per call.
-    preprocessed_xcorr: Option<&'a [Vec<f32>]>,
+    /// f64 for cross-implementation bit-identical alignment with C# (OspreySharp).
+    preprocessed_xcorr: Option<&'a [Vec<f64>]>,
     /// For each spectrum in cand_spectra, its index into the window_spectra array.
     /// Used to look up pre-preprocessed XCorr data.
     cand_window_local: Option<&'a [usize]>,
@@ -5769,7 +5774,8 @@ fn run_search(
                 // per-entry preprocessing (binning + windowing + sliding window subtraction).
                 // Each spectrum is preprocessed once here; per-entry scoring then uses
                 // O(n_frags) dot product lookups instead of O(n_peaks) re-preprocessing.
-                let preprocessed_xcorr: Vec<Vec<f32>> = window_spectra
+                // f64 for cross-implementation bit-identical alignment with C#.
+                let preprocessed_xcorr: Vec<Vec<f64>> = window_spectra
                     .iter()
                     .map(|s| scorer.preprocess_spectrum_for_xcorr(s))
                     .collect();

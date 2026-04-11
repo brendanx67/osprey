@@ -2055,6 +2055,11 @@ impl SpectralScorer {
     /// 1. Windowing normalization (normalize to 50.0 within 10 windows)
     /// 2. Sliding window subtraction (offset=75)
     /// 3. Dot product scoring
+    ///
+    /// Preprocessing is done in f64 throughout to give bit-identical alignment
+    /// with the C# port (OspreySharp), which is a natural f64 environment.
+    /// Previously this pipeline used Vec<f32> which drifted from C# by ~4e-6
+    /// due to the extra precision in C#'s f64 accumulations.
     pub fn xcorr(&self, observed: &Spectrum, library: &LibraryEntry) -> SpectralScore {
         if library.fragments.is_empty() || observed.mzs.is_empty() {
             return SpectralScore::default();
@@ -2064,11 +2069,13 @@ impl SpectralScorer {
         let lib_cosine_score = self.lib_cosine(observed, library);
 
         // Bin observed spectrum using Comet BIN macro
-        let mut obs_binned = vec![0.0f32; self.bin_config.n_bins];
+        let mut obs_binned = vec![0.0f64; self.bin_config.n_bins];
         for (&mz, &intensity) in observed.mzs.iter().zip(observed.intensities.iter()) {
             if let Some(bin) = self.bin_config.mz_to_bin(mz) {
-                // Apply sqrt transformation to experimental spectrum
-                obs_binned[bin] += intensity.sqrt();
+                // Apply sqrt transformation to experimental spectrum. The
+                // f32 intensity is widened to f64 and sqrt'd in f64; matches
+                // C#'s `Math.Sqrt((double)float)` bit-for-bit.
+                obs_binned[bin] += (intensity as f64).sqrt();
             }
         }
 
@@ -2081,7 +2088,7 @@ impl SpectralScorer {
         // XCorr = sum of preprocessed experimental values at fragment bin positions
         // This matches Comet exactly: score = sum(experimental_preprocessed[frag_bins]) * 0.005
         // Directly sum at fragment positions — O(n_fragments) instead of O(n_bins)
-        let xcorr_raw: f32 = library
+        let xcorr_raw: f64 = library
             .fragments
             .iter()
             .filter_map(|frag| self.bin_config.mz_to_bin(frag.mz))
@@ -2089,10 +2096,10 @@ impl SpectralScorer {
             .sum();
 
         // Scale XCorr (pyXcorrDIA uses 0.005 for spectrum-centric)
-        let xcorr_scaled = xcorr_raw * 0.005f32;
+        let xcorr_scaled = xcorr_raw * 0.005_f64;
 
         SpectralScore {
-            xcorr: xcorr_scaled as f64,
+            xcorr: xcorr_scaled,
             ..lib_cosine_score
         }
     }
@@ -2255,13 +2262,13 @@ impl SpectralScorer {
     /// Apply Comet-style windowing normalization
     ///
     /// Divides spectrum into 10 windows and normalizes each to max=50.0
-    fn apply_windowing_normalization(&self, spectrum: &[f32]) -> Vec<f32> {
-        let mut result = vec![0.0f32; spectrum.len()];
+    fn apply_windowing_normalization(&self, spectrum: &[f64]) -> Vec<f64> {
+        let mut result = vec![0.0f64; spectrum.len()];
         let num_windows = 10;
         let window_size = (spectrum.len() / num_windows) + 1;
 
         // Find global max for threshold
-        let global_max = spectrum.iter().cloned().fold(0.0f32, f32::max);
+        let global_max = spectrum.iter().cloned().fold(0.0f64, f64::max);
         let threshold = global_max * 0.05;
 
         for window_idx in 0..num_windows {
@@ -2269,7 +2276,7 @@ impl SpectralScorer {
             let end = ((window_idx + 1) * window_size).min(spectrum.len());
 
             // Find max in this window
-            let mut window_max = 0.0f32;
+            let mut window_max = 0.0f64;
             for &val in &spectrum[start..end] {
                 if val > window_max {
                     window_max = val;
@@ -2295,19 +2302,19 @@ impl SpectralScorer {
     /// Uses prefix sum for O(n) performance instead of O(n × window).
     /// Comet divides by (2*offset) = 150 regardless of boundary effects.
     /// offset=75, matching Comet's iXcorrProcessingOffset default.
-    fn apply_sliding_window(&self, spectrum: &[f32]) -> Vec<f32> {
+    fn apply_sliding_window(&self, spectrum: &[f64]) -> Vec<f64> {
         let n = spectrum.len();
         let offset: usize = 75;
         // Comet uses (window_size - 1) = 2*offset = 150 as divisor
-        let norm_factor = 1.0f32 / (2 * offset) as f32;
+        let norm_factor = 1.0f64 / (2 * offset) as f64;
 
         // Build prefix sum for O(n) window sums
-        let mut prefix = vec![0.0f32; n + 1];
+        let mut prefix = vec![0.0f64; n + 1];
         for i in 0..n {
             prefix[i + 1] = prefix[i] + spectrum[i];
         }
 
-        let mut result = vec![0.0f32; n];
+        let mut result = vec![0.0f64; n];
         for i in 0..n {
             let left = i.saturating_sub(offset);
             let right = if i + offset < n { i + offset + 1 } else { n };
@@ -2332,12 +2339,15 @@ impl SpectralScorer {
     /// Preprocessing: bin → sqrt → windowing → flanking subtraction
     ///
     /// This allows precomputing once per spectrum and reusing across library entries.
-    pub fn preprocess_spectrum_for_xcorr(&self, spectrum: &Spectrum) -> Vec<f32> {
+    ///
+    /// Uses f64 throughout so the cross-implementation diff against C#
+    /// (OspreySharp) can hit bit-identical agreement.
+    pub fn preprocess_spectrum_for_xcorr(&self, spectrum: &Spectrum) -> Vec<f64> {
         // Bin observed spectrum with sqrt transformation using Comet BIN macro
-        let mut binned = vec![0.0f32; self.bin_config.n_bins];
+        let mut binned = vec![0.0f64; self.bin_config.n_bins];
         for (&mz, &intensity) in spectrum.mzs.iter().zip(spectrum.intensities.iter()) {
             if let Some(bin) = self.bin_config.mz_to_bin(mz) {
-                binned[bin] += intensity.sqrt();
+                binned[bin] += (intensity as f64).sqrt();
             }
         }
 
@@ -2357,13 +2367,13 @@ impl SpectralScorer {
             return 0.0;
         }
         let preprocessed = self.preprocess_spectrum_for_xcorr(spectrum);
-        let xcorr_raw: f32 = library
+        let xcorr_raw: f64 = library
             .fragments
             .iter()
             .filter_map(|frag| self.bin_config.mz_to_bin(frag.mz))
             .map(|bin| preprocessed[bin])
             .sum();
-        (xcorr_raw * 0.005) as f64
+        xcorr_raw * 0.005
     }
 
     /// Preprocess a library entry for XCorr (Comet-style)
@@ -2372,11 +2382,11 @@ impl SpectralScorer {
     /// Preprocessing: bin with unit intensity → windowing (NO flanking subtraction)
     ///
     /// This allows precomputing once per library entry and reusing across spectra.
-    pub fn preprocess_library_for_xcorr(&self, entry: &LibraryEntry) -> Vec<f32> {
+    pub fn preprocess_library_for_xcorr(&self, entry: &LibraryEntry) -> Vec<f64> {
         // Bin library fragments with unit intensity using Comet BIN macro
         // Comet-style: theoretical spectrum is NOT windowed, just unit intensities at fragment bins
         // The score is simply: sum(experimental_preprocessed[frag_bins]) * 0.005
-        let mut binned = vec![0.0f32; self.bin_config.n_bins];
+        let mut binned = vec![0.0f64; self.bin_config.n_bins];
         for frag in &entry.fragments {
             if let Some(bin) = self.bin_config.mz_to_bin(frag.mz) {
                 // Use unit intensity (1.0), NOT library intensity (Comet-style)
@@ -2392,12 +2402,12 @@ impl SpectralScorer {
 
     /// Compute XCorr from preprocessed vectors
     ///
-    /// Uses ndarray dot product which dispatches to BLAS sdot for contiguous f32 slices.
+    /// Uses ndarray dot product which dispatches to BLAS ddot for contiguous f64 slices.
     /// Returns f64 for compatibility with scoring pipelines.
     #[inline]
     pub fn xcorr_from_preprocessed(
-        spectrum_preprocessed: &[f32],
-        library_preprocessed: &[f32],
+        spectrum_preprocessed: &[f64],
+        library_preprocessed: &[f64],
     ) -> f64 {
         use ndarray::ArrayView1;
 
@@ -2407,7 +2417,7 @@ impl SpectralScorer {
         let raw = spec.dot(&lib);
 
         // Scale XCorr (pyXcorrDIA uses 0.005 for spectrum-centric)
-        (raw * 0.005f32) as f64
+        raw * 0.005
     }
 
     /// Get the number of bins used for XCorr
