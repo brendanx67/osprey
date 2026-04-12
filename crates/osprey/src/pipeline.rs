@@ -707,6 +707,35 @@ fn run_calibration_discovery_windowed(
             robustness_iter: 2,
             outlier_retention: 1.0, // Use all calibration points — LDA + S/N already filtered
         };
+
+        // Cross-implementation diagnostic: dump the (lib_rt, measured_rt) pairs
+        // fed to LOESS, sorted by lib_rt ascending, at {:.17} full-bit precision.
+        // Gated by OSPREY_DUMP_LOESS_INPUT. Used to verify that Rust and C#
+        // see identical inputs before LOESS fitting.
+        if std::env::var("OSPREY_DUMP_LOESS_INPUT").is_ok() {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::File::create("rust_loess_input.txt") {
+                writeln!(f, "idx\tlib_rt\tmeasured_rt").ok();
+                let mut pairs: Vec<(f64, f64)> = library_rts_detected
+                    .iter()
+                    .zip(measured_rts_detected.iter())
+                    .map(|(&x, &y)| (x, y))
+                    .collect();
+                pairs.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+                for (i, (lib_rt, meas_rt)) in pairs.iter().enumerate() {
+                    writeln!(f, "{}\t{:.17}\t{:.17}", i, lib_rt, meas_rt).ok();
+                }
+                log::info!(
+                    "Wrote LOESS input dump: rust_loess_input.txt ({} pairs)",
+                    pairs.len()
+                );
+            }
+            if std::env::var("OSPREY_LOESS_INPUT_ONLY").is_ok() {
+                log::info!("OSPREY_LOESS_INPUT_ONLY set - aborting after LOESS input dump");
+                std::process::exit(0);
+            }
+        }
+
         let calibrator = RTCalibrator::with_config(calibrator_config);
         let mut rt_calibration = calibrator.fit(&library_rts_detected, &measured_rts_detected)?;
         let mut rt_stats = rt_calibration.stats();
