@@ -4624,13 +4624,13 @@ mod tests {
 
         // Preprocessed XCorr: manually compute what xcorr does
         let preprocessed = scorer.preprocess_spectrum_for_xcorr(&spectrum);
-        let xcorr_raw: f32 = entry
+        let xcorr_raw: f64 = entry
             .fragments
             .iter()
             .filter_map(|frag| scorer.bin_config().mz_to_bin(frag.mz))
             .map(|bin| preprocessed[bin])
             .sum();
-        let xcorr_preprocessed = (xcorr_raw * 0.005) as f64;
+        let xcorr_preprocessed = xcorr_raw * 0.005;
 
         assert!(
             (direct_score.xcorr - xcorr_preprocessed).abs() < 1e-6,

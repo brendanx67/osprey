@@ -1540,9 +1540,8 @@ pub fn sample_library_for_calibration(
         // to make comparison order-independent)
         if let Ok(mut f) = std::fs::File::create("rust_cal_grid.txt") {
             writeln!(f, "rt_bin\tmz_bin\tcount\ttarget_ids").ok();
-            for r in 0..bins_per_axis {
-                for c in 0..bins_per_axis {
-                    let cell = &grid[r][c];
+            for (r, row) in grid.iter().enumerate().take(bins_per_axis) {
+                for (c, cell) in row.iter().enumerate().take(bins_per_axis) {
                     if cell.is_empty() {
                         continue;
                     }
@@ -1652,7 +1651,11 @@ pub fn sample_library_for_calibration(
             for t in &tuples {
                 writeln!(f, "{}", t).ok();
             }
-            log::info!("Wrote calibration sample to {} ({} targets)", dump_path, tuples.len());
+            log::info!(
+                "Wrote calibration sample to {} ({} targets)",
+                dump_path,
+                tuples.len()
+            );
         }
 
         if abort_after {
@@ -2620,11 +2623,22 @@ pub fn run_coelution_calibration_scoring<M: MS1SpectrumLookup>(
             use std::io::Write;
             let dump_path = format!("rust_xic_entry_{}.txt", entry.id);
             if let Ok(mut f) = std::fs::File::create(&dump_path) {
-                writeln!(f, "# per-entry chromatogram dump for entry_id={} (pass {})",
-                    entry.id, current_pass).ok();
-                writeln!(f, "# {} ({}, charge={}, lib_rt={:.10}, mz={:.10})",
-                    entry.modified_sequence, entry.sequence, entry.charge,
-                    entry.retention_time, entry.precursor_mz).ok();
+                writeln!(
+                    f,
+                    "# per-entry chromatogram dump for entry_id={} (pass {})",
+                    entry.id, current_pass
+                )
+                .ok();
+                writeln!(
+                    f,
+                    "# {} ({}, charge={}, lib_rt={:.10}, mz={:.10})",
+                    entry.modified_sequence,
+                    entry.sequence,
+                    entry.charge,
+                    entry.retention_time,
+                    entry.precursor_mz
+                )
+                .ok();
 
                 // Pass 2 calculations block: dump the inputs that feed into XIC
                 // extraction so if the XICs don't match, we already have the
@@ -2638,8 +2652,18 @@ pub fn run_coelution_calibration_scoring<M: MS1SpectrumLookup>(
                     writeln!(f, "# loess.residual_sd={:.10}", loess_stats.residual_std).ok();
                     writeln!(f, "# loess.mean_residual={:.10}", loess_stats.mean_residual).ok();
                     writeln!(f, "# loess.max_residual={:.10}", loess_stats.max_residual).ok();
-                    writeln!(f, "# loess.p20_abs_residual={:.10}", loess_stats.p20_abs_residual).ok();
-                    writeln!(f, "# loess.p80_abs_residual={:.10}", loess_stats.p80_abs_residual).ok();
+                    writeln!(
+                        f,
+                        "# loess.p20_abs_residual={:.10}",
+                        loess_stats.p20_abs_residual
+                    )
+                    .ok();
+                    writeln!(
+                        f,
+                        "# loess.p80_abs_residual={:.10}",
+                        loess_stats.p80_abs_residual
+                    )
+                    .ok();
                     writeln!(f, "# loess.mad={:.10}", loess_stats.mad).ok();
                 }
                 // Compute the predicted expected_rt + rt window exactly as
@@ -2653,19 +2677,39 @@ pub fn run_coelution_calibration_scoring<M: MS1SpectrumLookup>(
                 writeln!(f, "# pass.library_rt={:.10}", entry.retention_time).ok();
                 writeln!(f, "# pass.expected_rt={:.10}", dump_expected_rt).ok();
                 writeln!(f, "# pass.tolerance={:.10}", rt_tolerance).ok();
-                writeln!(f, "# pass.rt_window_lo={:.10}", dump_expected_rt - rt_tolerance).ok();
-                writeln!(f, "# pass.rt_window_hi={:.10}", dump_expected_rt + rt_tolerance).ok();
+                writeln!(
+                    f,
+                    "# pass.rt_window_lo={:.10}",
+                    dump_expected_rt - rt_tolerance
+                )
+                .ok();
+                writeln!(
+                    f,
+                    "# pass.rt_window_hi={:.10}",
+                    dump_expected_rt + rt_tolerance
+                )
+                .ok();
                 // Rust's pipeline uses an identity linear mapping (slope=1,
                 // intercept=0) when ranges are similar. We emit these so the
                 // diff column-for-column matches the C# header layout.
                 writeln!(f, "# pass.rt_slope={:.10}", 1.0_f64).ok();
                 writeln!(f, "# pass.rt_intercept={:.10}", 0.0_f64).ok();
 
-                writeln!(f, "# n_post_prefilter_candidates={}", candidate_spectra.len()).ok();
+                writeln!(
+                    f,
+                    "# n_post_prefilter_candidates={}",
+                    candidate_spectra.len()
+                )
+                .ok();
                 writeln!(f, "# CANDIDATES (post-prefilter, sorted by RT)").ok();
                 writeln!(f, "candidate\tscan_idx\tscan_number\trt").ok();
                 for (i, s) in candidate_spectra.iter().enumerate() {
-                    writeln!(f, "candidate\t{}\t{}\t{:.10}", i, s.scan_number, s.retention_time).ok();
+                    writeln!(
+                        f,
+                        "candidate\t{}\t{}\t{:.10}",
+                        i, s.scan_number, s.retention_time
+                    )
+                    .ok();
                 }
                 // Also list top-6 fragments with their m/z so the diff is interpretable.
                 let top_indices = super::get_top_n_fragment_indices(&entry.fragments, 6);
@@ -2673,8 +2717,12 @@ pub fn run_coelution_calibration_scoring<M: MS1SpectrumLookup>(
                 writeln!(f, "topfrag\ttop_idx\tlib_idx\tlib_mz\tlib_intensity").ok();
                 for (rank, &fi) in top_indices.iter().enumerate() {
                     let f_obj = &entry.fragments[fi];
-                    writeln!(f, "topfrag\t{}\t{}\t{:.10}\t{:.10}",
-                        rank, fi, f_obj.mz, f_obj.relative_intensity).ok();
+                    writeln!(
+                        f,
+                        "topfrag\t{}\t{}\t{:.10}\t{:.10}",
+                        rank, fi, f_obj.mz, f_obj.relative_intensity
+                    )
+                    .ok();
                 }
             }
         }
@@ -2700,14 +2748,14 @@ pub fn run_coelution_calibration_scoring<M: MS1SpectrumLookup>(
                 // mode differences between Rust and C#.
                 for (lib_idx, xic) in &xics {
                     for (i, (rt, intensity)) in xic.iter().enumerate() {
-                        writeln!(f, "xic\t{}\t{}\t{:.10}\t{:.10}",
-                            lib_idx, i, rt, intensity).ok();
+                        writeln!(f, "xic\t{}\t{}\t{:.10}\t{:.10}", lib_idx, i, rt, intensity).ok();
                     }
                 }
             }
             log::info!(
                 "[BISECT] OSPREY_DIAG_XIC_ENTRY_ID matched on pass {} - wrote {} and exiting",
-                current_pass, dump_path
+                current_pass,
+                dump_path
             );
             std::process::exit(0);
         }
@@ -2943,7 +2991,9 @@ pub fn run_coelution_calibration_scoring<M: MS1SpectrumLookup>(
     let dump_windows = std::env::var("OSPREY_DUMP_CAL_WINDOWS").is_ok();
     let abort_after_windows = std::env::var("OSPREY_CAL_WINDOWS_ONLY").is_ok();
     let window_dump = if dump_windows {
-        Some(std::sync::Mutex::new(Vec::<String>::with_capacity(library.len() * 2)))
+        Some(std::sync::Mutex::new(Vec::<String>::with_capacity(
+            library.len() * 2,
+        )))
     } else {
         None
     };
@@ -2954,7 +3004,9 @@ pub fn run_coelution_calibration_scoring<M: MS1SpectrumLookup>(
     let dump_prefilter = std::env::var("OSPREY_DUMP_CAL_PREFILTER").is_ok();
     let abort_after_prefilter = std::env::var("OSPREY_CAL_PREFILTER_ONLY").is_ok();
     let prefilter_dump = if dump_prefilter {
-        Some(std::sync::Mutex::new(Vec::<String>::with_capacity(library.len() * 2)))
+        Some(std::sync::Mutex::new(Vec::<String>::with_capacity(
+            library.len() * 2,
+        )))
     } else {
         None
     };
@@ -3039,10 +3091,8 @@ pub fn run_coelution_calibration_scoring<M: MS1SpectrumLookup>(
                 // additional logic. Even if candidate_pairs is empty, we want
                 // to record n=0 so the dump has one row per (entry, window).
                 if let Some(mtx) = prefilter_dump_ref {
-                    let mut scans: Vec<u32> = candidate_pairs
-                        .iter()
-                        .map(|(_, s)| s.scan_number)
-                        .collect();
+                    let mut scans: Vec<u32> =
+                        candidate_pairs.iter().map(|(_, s)| s.scan_number).collect();
                     scans.sort();
                     let scans_str = scans
                         .iter()
@@ -3140,7 +3190,10 @@ pub fn run_coelution_calibration_scoring<M: MS1SpectrumLookup>(
             for r in &rows {
                 writeln!(f, "{}", r).ok();
             }
-            log::info!("Wrote calibration windows dump: rust_cal_windows.txt ({} rows)", rows.len());
+            log::info!(
+                "Wrote calibration windows dump: rust_cal_windows.txt ({} rows)",
+                rows.len()
+            );
         }
         if abort_after_windows {
             log::info!("OSPREY_CAL_WINDOWS_ONLY set - aborting after window dump");
@@ -3183,7 +3236,8 @@ pub fn run_coelution_calibration_scoring<M: MS1SpectrumLookup>(
         let dump_path = "rust_cal_match.txt";
 
         // Build match lookup keyed by entry_id
-        let mut by_id: std::collections::HashMap<u32, &CalibrationMatch> = std::collections::HashMap::new();
+        let mut by_id: std::collections::HashMap<u32, &CalibrationMatch> =
+            std::collections::HashMap::new();
         for m in &results {
             by_id.insert(m.entry_id, m);
         }
