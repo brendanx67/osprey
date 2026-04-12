@@ -5244,6 +5244,57 @@ fn compute_features_at_peak(
         let lib_preprocessed = ctx.scorer.preprocess_library_for_xcorr(entry);
         score.xcorr =
             SpectralScorer::xcorr_from_preprocessed(&preprocessed[win_idx], &lib_preprocessed);
+
+        // XCorr diagnostic for bisection
+        if let Ok(diag_scan) = std::env::var("OSPREY_DIAG_XCORR_SCAN") {
+            if format!("{}", apex_spectrum.scan_number) == diag_scan {
+                use std::io::Write;
+                let pre_vec = &preprocessed[win_idx];
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("rust_xcorr_diag.txt")
+                {
+                    let _ = writeln!(
+                        f,
+                        "# XCORR DIAG scan={} entry={}",
+                        apex_spectrum.scan_number, entry.modified_sequence
+                    );
+                    let _ = writeln!(f, "# nbins={} xcorr_scaled={}", pre_vec.len(), score.xcorr);
+                    let psum: f64 = pre_vec.iter().sum();
+                    let pnz = pre_vec.iter().filter(|&&v| v != 0.0).count();
+                    let _ = writeln!(f, "# preprocessed_sum={} nonzero={}", psum, pnz);
+                    // First 20 nonzero preprocessed bins
+                    let mut dumped = 0;
+                    for (i, &v) in pre_vec.iter().enumerate() {
+                        if v != 0.0 {
+                            let _ = writeln!(f, "pre\t{}\t{}", i, v);
+                            dumped += 1;
+                        }
+                        if dumped >= 20 {
+                            break;
+                        }
+                    }
+                    // Fragment bin lookups + library preprocessed values
+                    let _ = writeln!(f, "# fragment_bins");
+                    for (fi, frag) in entry.fragments.iter().enumerate() {
+                        let bin = ctx.scorer.bin_config().mz_to_bin(frag.mz);
+                        let pre_val = bin
+                            .map(|b| pre_vec.get(b).copied().unwrap_or(0.0))
+                            .unwrap_or(0.0);
+                        let lib_val = bin
+                            .map(|b| lib_preprocessed.get(b).copied().unwrap_or(0.0))
+                            .unwrap_or(0.0);
+                        let _ = writeln!(
+                            f,
+                            "frag\t{}\tmz={}\tbin={:?}\tpre_val={}\tlib_val={}",
+                            fi, frag.mz, bin, pre_val, lib_val
+                        );
+                    }
+                }
+            }
+        }
+
         score
     } else {
         ctx.scorer.xcorr(apex_spectrum, entry)
