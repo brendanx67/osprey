@@ -700,12 +700,14 @@ fn run_calibration_discovery_windowed(
         // Fit LOESS RT calibration
         // Use actual number of points or config minimum, whichever is smaller
         let effective_min_points = num_confident_peptides.min(rt_config.min_calibration_points);
+        let classical_robust = std::env::var("OSPREY_LOESS_CLASSICAL_ROBUST").is_ok();
         let calibrator_config = RTCalibratorConfig {
             bandwidth: rt_config.loess_bandwidth,
             degree: 1,
             min_points: effective_min_points,
             robustness_iter: 2,
             outlier_retention: 1.0, // Use all calibration points — LDA + S/N already filtered
+            classical_robust_iterations: classical_robust,
         };
 
         // Cross-implementation diagnostic: dump the (lib_rt, measured_rt) pairs
