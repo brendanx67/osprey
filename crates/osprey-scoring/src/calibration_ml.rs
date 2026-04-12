@@ -83,6 +83,39 @@ pub fn train_and_score_calibration(
         m.q_value = q_values[i];
     }
 
+    // Cross-implementation diagnostic: dump per-entry LDA discriminant + q-value
+    // sorted by entry_id for stable diff with cs_lda_scores.txt. Gated by
+    // OSPREY_DUMP_LDA_SCORES; exits after write when OSPREY_LDA_SCORES_ONLY is set.
+    // Uses {:.10} to avoid banker's-vs-half-up text rounding mismatches with C#.
+    if std::env::var("OSPREY_DUMP_LDA_SCORES").is_ok() {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::File::create("rust_lda_scores.txt") {
+            writeln!(f, "entry_id\tis_decoy\tdiscriminant\tq_value").ok();
+            let mut indices: Vec<usize> = (0..matches.len()).collect();
+            indices.sort_by_key(|&i| matches[i].entry_id);
+            for i in indices {
+                let m = &matches[i];
+                writeln!(
+                    f,
+                    "{}\t{}\t{:.10}\t{:.10}",
+                    m.entry_id,
+                    if m.is_decoy { 1 } else { 0 },
+                    m.discriminant_score,
+                    m.q_value
+                )
+                .ok();
+            }
+            log::info!(
+                "Wrote LDA scores dump: rust_lda_scores.txt ({} entries)",
+                matches.len()
+            );
+        }
+        if std::env::var("OSPREY_LDA_SCORES_ONLY").is_ok() {
+            log::info!("OSPREY_LDA_SCORES_ONLY set - aborting after LDA dump");
+            std::process::exit(0);
+        }
+    }
+
     // 9. Sort by discriminant score descending (best matches first)
     matches.sort_by(|a, b| b.discriminant_score.total_cmp(&a.discriminant_score));
 
