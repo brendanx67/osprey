@@ -5754,6 +5754,22 @@ fn run_search(
         SpectralScorer::new().with_tolerance_da(fragment_tolerance.tolerance)
     };
 
+    // Per-entry search XIC diagnostic. Dumps XIC data for specified entries
+    // during the main search (does NOT exit — collects all in one run).
+    // Usage: OSPREY_DIAG_SEARCH_ENTRY_IDS=0,100,5000,50000
+    let diag_search_entry_ids: Option<std::collections::HashSet<u32>> =
+        std::env::var("OSPREY_DIAG_SEARCH_ENTRY_IDS").ok().map(|s| {
+            let ids: std::collections::HashSet<u32> = s
+                .split(',')
+                .filter_map(|p| p.trim().parse::<u32>().ok())
+                .collect();
+            log::info!(
+                "[BISECT] OSPREY_DIAG_SEARCH_ENTRY_IDS: will dump {} entries",
+                ids.len()
+            );
+            ids
+        });
+
     // Progress bar — one tick per isolation window, with descriptive label.
     let pb = ProgressBar::new(window_groups.len() as u64);
     let bar_template = format!(
@@ -5959,6 +5975,69 @@ fn run_search(
                             tol_ppm,
                             6,
                         );
+
+                        // Per-entry search XIC diagnostic dump
+                        if let Some(ref ids) = diag_search_entry_ids {
+                            if ids.contains(&entry.id) {
+                                use std::io::Write;
+                                let dump_path = format!("rust_search_xic_entry_{}.txt", entry.id);
+                                if let Ok(mut f) = std::fs::File::create(&dump_path) {
+                                    let _ = writeln!(f, "# search XIC dump for entry_id={}", entry.id);
+                                    let _ = writeln!(
+                                        f,
+                                        "# {} ({}, charge={}, lib_rt={:.10}, mz={:.10})",
+                                        entry.modified_sequence,
+                                        entry.sequence,
+                                        entry.charge,
+                                        entry.retention_time,
+                                        entry.precursor_mz
+                                    );
+                                    let _ = writeln!(
+                                        f,
+                                        "# is_decoy={}",
+                                        if entry.is_decoy { 1 } else { 0 }
+                                    );
+                                    let _ = writeln!(f, "# expected_rt={:.10}", expected_rt);
+                                    let _ = writeln!(f, "# rt_tolerance={:.10}", rt_tolerance);
+                                    let _ = writeln!(
+                                        f,
+                                        "# scan_range=[0..{}] n_scans={}",
+                                        cand_spectra.len().saturating_sub(1),
+                                        cand_spectra.len()
+                                    );
+                                    let _ = writeln!(f, "# CANDIDATES (scan_idx, scan_number, rt)");
+                                    let _ = writeln!(f, "candidate\tscan_idx\tscan_number\trt");
+                                    for (i, spec) in cand_spectra.iter().enumerate() {
+                                        let _ = writeln!(
+                                            f,
+                                            "candidate\t{}\t{}\t{:.10}",
+                                            i, spec.scan_number, spec.retention_time
+                                        );
+                                    }
+                                    let _ = writeln!(
+                                        f,
+                                        "# EXTRACTED XICS (lib_idx, scan_idx, rt, intensity)"
+                                    );
+                                    let _ = writeln!(f, "xic\tlib_idx\tscan_idx\trt\tintensity");
+                                    for (frag_idx, xic_data) in &xics {
+                                        for (i, (rt, intensity)) in xic_data.iter().enumerate() {
+                                            let _ = writeln!(
+                                                f,
+                                                "xic\t{}\t{}\t{:.10}\t{:.10}",
+                                                frag_idx, i, rt, intensity
+                                            );
+                                        }
+                                    }
+                                }
+                                log::info!(
+                                    "[BISECT] Search XIC dump for entry {}: {} xics, {} scans -> {}",
+                                    entry.id,
+                                    xics.len(),
+                                    cand_spectra.len(),
+                                    dump_path
+                                );
+                            }
+                        }
 
                         if xics.len() < 2 {
                             return None;
