@@ -5411,6 +5411,56 @@ fn compute_features_at_peak(
             let res = median_polish_residual_ratio(mp);
             let min_r2 = median_polish_min_fragment_r2(mp);
             let resid_corr = median_polish_residual_correlation(mp);
+
+            // Median polish diagnostic for bisection
+            if let Ok(diag_scan) = std::env::var("OSPREY_DIAG_MP_SCAN") {
+                let scan_str = format!("{}", apex_spectrum.scan_number);
+                if scan_str == diag_scan && entry.modified_sequence.contains("DECOY_ALQFAQWWK") {
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::File::create("rust_mp_diag.txt") {
+                        let _ = writeln!(
+                            f,
+                            "# Median polish diagnostic for {} scan={}",
+                            entry.modified_sequence, apex_spectrum.scan_number
+                        );
+                        let _ = writeln!(
+                            f,
+                            "# peak range: start={} apex={} end={} len={}",
+                            peak.start_index,
+                            peak.apex_index,
+                            peak.end_index,
+                            peak.end_index - peak.start_index + 1
+                        );
+                        let _ = writeln!(
+                            f,
+                            "# mp_cosine={:.10} mp_rr={:.10} mp_r2={:.10} mp_rc={:.10}",
+                            cos, res, min_r2, resid_corr
+                        );
+                        let _ = writeln!(f, "# ELUTION PROFILE (col_effects)");
+                        for (i, v) in mp.col_effects.iter().enumerate() {
+                            let _ = writeln!(f, "elution\t{}\t{:.10}", i, v);
+                        }
+                        let _ = writeln!(f, "# FRAGMENT EFFECTS (row_effects)");
+                        for (i, v) in mp.row_effects.iter().enumerate() {
+                            let _ = writeln!(f, "frag_effect\t{}\t{:.10}", i, v);
+                        }
+                        let _ = writeln!(f, "# grand_mean={:.10}", mp.overall);
+                        let _ = writeln!(
+                            f,
+                            "# n_iterations={} converged={}",
+                            mp.n_iterations, mp.converged
+                        );
+                        let _ = writeln!(f, "# INPUT MATRIX (frag_idx, scan_idx, value)");
+                        for (xi, (_, xic_data)) in peak_xics.iter().enumerate() {
+                            for (s, (_, v)) in xic_data.iter().enumerate() {
+                                let _ = writeln!(f, "input\t{}\t{}\t{:.10}", xi, s, v);
+                            }
+                        }
+                    }
+                    log::info!("[BISECT] Wrote median polish diagnostic: rust_mp_diag.txt");
+                }
+            }
+
             (cos, rsq, res, min_r2, resid_corr)
         } else {
             (0.0, 0.0, 1.0, 0.0, 0.0)
@@ -6191,6 +6241,46 @@ fn run_search(
                             })
                             .collect();
                         scored_candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+                        // Append peak boundary data to search XIC diagnostic dump
+                        if let Some(ref ids) = diag_search_entry_ids {
+                            if ids.contains(&entry.id) {
+                                use std::io::Write;
+                                let dump_path =
+                                    format!("rust_search_xic_entry_{}.txt", entry.id);
+                                if let Ok(mut f) =
+                                    std::fs::OpenOptions::new().append(true).open(&dump_path)
+                                {
+                                    let _ = writeln!(
+                                        f,
+                                        "# CWT PEAKS: {} candidates",
+                                        scored_candidates.len()
+                                    );
+                                    let _ = writeln!(
+                                        f,
+                                        "peak\tidx\tstart\tapex\tend\tcorr_score"
+                                    );
+                                    for (pi, (bp, score)) in
+                                        scored_candidates.iter().enumerate()
+                                    {
+                                        let _ = writeln!(
+                                            f,
+                                            "peak\t{}\t{}\t{}\t{}\t{:.10}",
+                                            pi, bp.start_index, bp.apex_index,
+                                            bp.end_index, score
+                                        );
+                                    }
+                                    let best_bp = scored_candidates[0].0;
+                                    let _ = writeln!(
+                                        f,
+                                        "# BEST PEAK: idx=0 start={} apex={} end={}",
+                                        best_bp.start_index,
+                                        best_bp.apex_index,
+                                        best_bp.end_index
+                                    );
+                                }
+                            }
+                        }
 
                         // Store top-N CWT candidates for inter-replicate reconciliation
                         let top_n = config.reconciliation.top_n_peaks;
