@@ -1678,7 +1678,15 @@ const MAX_DIA_WINDOW_WIDTH: f64 = 25.0;
 ///
 /// Returns: Vec of ((lower_bound, upper_bound), spectrum_indices)
 pub fn group_spectra_by_isolation_window(spectra: &[Spectrum]) -> Vec<((f64, f64), Vec<usize>)> {
-    let mut windows: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+    // Keyed by truncated (0.1 m/z) bounds so floating-point noise on the
+    // isolation window center/bounds doesn't split one window across multiple
+    // buckets. The VALUE carries the actual full-precision bounds so that
+    // entry-to-window precursor_mz filtering uses the real boundary, not the
+    // truncated one. (The prior implementation used the truncated bounds for
+    // filtering, which included entries at the boundary in the wrong window
+    // - a 2-entry misplacement on Astral that cascaded through LDA fold
+    // assignment and diverged from OspreySharp's full-precision behavior.)
+    let mut windows: HashMap<(i64, i64), ((f64, f64), Vec<usize>)> = HashMap::new();
     let mut n_wide_skipped = 0usize;
 
     for (idx, spec) in spectra.iter().enumerate() {
@@ -1690,11 +1698,15 @@ pub fn group_spectra_by_isolation_window(spectra: &[Spectrum]) -> Vec<((f64, f64
             continue;
         }
 
-        // Round window bounds to avoid floating point issues (0.1 m/z precision)
-        let lower_key = (iso.lower_bound() * 10.0) as i64;
-        let upper_key = (iso.upper_bound() * 10.0) as i64;
+        let lower = iso.lower_bound();
+        let upper = iso.upper_bound();
+        let lower_key = (lower * 10.0) as i64;
+        let upper_key = (upper * 10.0) as i64;
 
-        windows.entry((lower_key, upper_key)).or_default().push(idx);
+        let entry = windows
+            .entry((lower_key, upper_key))
+            .or_insert_with(|| ((lower, upper), Vec::new()));
+        entry.1.push(idx);
     }
 
     if n_wide_skipped > 0 {
@@ -1705,11 +1717,11 @@ pub fn group_spectra_by_isolation_window(spectra: &[Spectrum]) -> Vec<((f64, f64
         );
     }
 
-    // Convert back to f64 windows with spectrum indices, sorted by lower bound
+    // Emit full-precision bounds (preserved per-bucket) sorted by lower bound
     // for deterministic ordering regardless of HashMap iteration order.
     let mut result: Vec<((f64, f64), Vec<usize>)> = windows
         .into_iter()
-        .map(|((lower, upper), indices)| ((lower as f64 / 10.0, upper as f64 / 10.0), indices))
+        .map(|(_, (bounds, indices))| (bounds, indices))
         .collect();
     result.sort_by(|a, b| a.0 .0.total_cmp(&b.0 .0).then(a.0 .1.total_cmp(&b.0 .1)));
     result
@@ -2702,12 +2714,20 @@ pub fn run_coelution_calibration_scoring<M: MS1SpectrumLookup>(
                 )
                 .ok();
                 writeln!(f, "# CANDIDATES (post-prefilter, sorted by RT)").ok();
-                writeln!(f, "candidate\tscan_idx\tscan_number\trt").ok();
+                writeln!(
+                    f,
+                    "candidate\tscan_idx\tscan_number\trt\tiso_lower\tiso_upper"
+                )
+                .ok();
                 for (i, s) in candidate_spectra.iter().enumerate() {
                     writeln!(
                         f,
-                        "candidate\t{}\t{}\t{:.10}",
-                        i, s.scan_number, s.retention_time
+                        "candidate\t{}\t{}\t{:.10}\t{:.10}\t{:.10}",
+                        i,
+                        s.scan_number,
+                        s.retention_time,
+                        s.isolation_window.lower_bound(),
+                        s.isolation_window.upper_bound()
                     )
                     .ok();
                 }
