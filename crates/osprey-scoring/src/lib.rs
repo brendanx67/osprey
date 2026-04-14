@@ -2085,15 +2085,24 @@ impl SpectralScorer {
         // Apply sliding window subtraction (fast XCorr preprocessing)
         let xcorr_preprocessed = self.apply_sliding_window(&windowed);
 
-        // XCorr = sum of preprocessed experimental values at fragment bin positions
-        // This matches Comet exactly: score = sum(experimental_preprocessed[frag_bins]) * 0.005
-        // Directly sum at fragment positions — O(n_fragments) instead of O(n_bins)
-        let xcorr_raw: f64 = library
-            .fragments
-            .iter()
-            .filter_map(|frag| self.bin_config.mz_to_bin(frag.mz))
-            .map(|bin| xcorr_preprocessed[bin])
-            .sum();
+        // XCorr = sum of preprocessed experimental values at UNIQUE fragment
+        // bin positions. Shared bins (two fragments whose m/z fall into the
+        // same bin) must contribute once, not twice -- the theoretical
+        // spectrum uses unit intensity per bin (Comet-style), not accumulated
+        // intensity per fragment. This matches preprocess_library_for_xcorr
+        // (which sets binned[bin] = 1.0 per unique bin) and brings
+        // scorer.xcorr() in line with xcorr_from_preprocessed.
+        let n_bins = xcorr_preprocessed.len();
+        let mut visited = vec![false; n_bins];
+        let mut xcorr_raw: f64 = 0.0;
+        for frag in &library.fragments {
+            if let Some(bin) = self.bin_config.mz_to_bin(frag.mz) {
+                if !visited[bin] {
+                    visited[bin] = true;
+                    xcorr_raw += xcorr_preprocessed[bin];
+                }
+            }
+        }
 
         // Scale XCorr (pyXcorrDIA uses 0.005 for spectrum-centric)
         let xcorr_scaled = xcorr_raw * 0.005_f64;
@@ -2367,12 +2376,20 @@ impl SpectralScorer {
             return 0.0;
         }
         let preprocessed = self.preprocess_spectrum_for_xcorr(spectrum);
-        let xcorr_raw: f64 = library
-            .fragments
-            .iter()
-            .filter_map(|frag| self.bin_config.mz_to_bin(frag.mz))
-            .map(|bin| preprocessed[bin])
-            .sum();
+        // Dedup fragment bins: unique bins only (Comet theoretical spectrum
+        // uses unit intensity per bin, not accumulated per fragment). Matches
+        // preprocess_library_for_xcorr and scorer.xcorr().
+        let n_bins = preprocessed.len();
+        let mut visited = vec![false; n_bins];
+        let mut xcorr_raw: f64 = 0.0;
+        for frag in &library.fragments {
+            if let Some(bin) = self.bin_config.mz_to_bin(frag.mz) {
+                if !visited[bin] {
+                    visited[bin] = true;
+                    xcorr_raw += preprocessed[bin];
+                }
+            }
+        }
         xcorr_raw * 0.005
     }
 

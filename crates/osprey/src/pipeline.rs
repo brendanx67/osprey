@@ -2619,6 +2619,17 @@ pub fn run_analysis(config: OspreyConfig) -> Result<()> {
         config.input_files.len()
     );
 
+    // Optional early exit after Stage 4 (scoring only, no FDR). Used for
+    // benchmarking Stages 1-4 and feature-parity testing without Stage 5+
+    // overhead. Mirrors the C# OspreySharp OSPREY_EXIT_AFTER_SCORING env var.
+    if std::env::var("OSPREY_EXIT_AFTER_SCORING").is_ok() {
+        log::info!(
+            "[BENCH] OSPREY_EXIT_AFTER_SCORING set - exiting after Stage 4 ({} entries)",
+            total_scored
+        );
+        return Ok(());
+    }
+
     if per_file_entries.is_empty() || total_scored == 0 {
         log::warn!("No scored entries found. Cannot perform FDR control.");
         return Ok(());
