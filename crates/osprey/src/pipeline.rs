@@ -2536,6 +2536,16 @@ pub fn run_analysis(config: OspreyConfig) -> Result<()> {
                 );
             }
 
+            // Optional early exit after Stage 3 (calibration done, no main search).
+            // Used for Stage 1-3 perf benchmarking and for walking up to the
+            // main search incrementally without paying the Stage 4 cost.
+            if std::env::var("OSPREY_EXIT_AFTER_CALIBRATION").is_ok() {
+                log::info!(
+                    "[BENCH] OSPREY_EXIT_AFTER_CALIBRATION set - exiting after Stage 3 (calibration done)"
+                );
+                return Ok(());
+            }
+
             // Run coelution search
             let entries = run_search(
                 &library,
