@@ -1680,26 +1680,40 @@ impl SpectralScorer {
             return SpectralScore::default();
         }
 
-        // L2 normalize for cosine
+        // L2 normalize for cosine. When either norm is too small (no matched
+        // obs intensity, or the library has no non-zero intensities in range)
+        // the cosine is undefined; treat that as zero but still populate the
+        // presence/counting features below — C# separates cosine from the
+        // counting features (see OspreySharp ComputeApexMatchFeatures), so
+        // tying all of them to the norm gate diverged on short/low-signal
+        // peptides.
         let lib_norm = lib_preprocessed.iter().map(|x| x * x).sum::<f64>().sqrt();
         let obs_norm = obs_preprocessed.iter().map(|x| x * x).sum::<f64>().sqrt();
 
-        if lib_norm < 1e-10 || obs_norm < 1e-10 {
-            return SpectralScore::default();
-        }
+        let cosine_ok = lib_norm >= 1e-10 && obs_norm >= 1e-10;
 
-        let dot_product: f64 = lib_preprocessed
-            .iter()
-            .zip(obs_preprocessed.iter())
-            .map(|(a, b)| (a / lib_norm) * (b / obs_norm))
-            .sum();
+        let dot_product = if cosine_ok {
+            lib_preprocessed
+                .iter()
+                .zip(obs_preprocessed.iter())
+                .map(|(a, b)| (a / lib_norm) * (b / obs_norm))
+                .sum()
+        } else {
+            0.0
+        };
 
         // Pearson and Spearman use sqrt-preprocessed intensities including zeros
         // for unmatched fragments. The zeros are essential — they penalize missing
         // matches. Without them, a decoy with 2 random matches would score higher
         // than a target with 6 matches but some noise.
-        let pearson_correlation = Self::pearson_correlation(&lib_preprocessed, &obs_preprocessed);
-        let spearman_correlation = Self::spearman_correlation(&lib_preprocessed, &obs_preprocessed);
+        let (pearson_correlation, spearman_correlation) = if cosine_ok {
+            (
+                Self::pearson_correlation(&lib_preprocessed, &obs_preprocessed),
+                Self::spearman_correlation(&lib_preprocessed, &obs_preprocessed),
+            )
+        } else {
+            (0.0, 0.0)
+        };
 
         // Counting metrics use matched fragments only (presence-based)
         let n_matched = matches.len() as u32;
@@ -1895,22 +1909,22 @@ impl SpectralScorer {
     }
 
     /// Find longest consecutive b or y ion series
-    fn longest_consecutive_ions(&self, library: &LibraryEntry, matches: &[FragmentMatch]) -> u32 {
-        // Build sets of matched b and y ion ordinals
+    fn longest_consecutive_ions(&self, _library: &LibraryEntry, matches: &[FragmentMatch]) -> u32 {
+        // Build sets of matched b and y ion ordinals from each FragmentMatch's
+        // own annotation. An earlier implementation reverse-looked-up the
+        // library by m/z and broke on the first hit, which mis-attributed
+        // ordinals whenever two library fragments shared a near-identical m/z
+        // (e.g. an incidental b_n / y_m collision) — C# iterates library
+        // fragments with their own ion type, so this port now does the same
+        // using the ordinal carried on the match itself.
         let mut matched_b: Vec<u8> = Vec::new();
         let mut matched_y: Vec<u8> = Vec::new();
 
         for m in matches {
-            // Find the corresponding library fragment annotation
-            for frag in &library.fragments {
-                if (frag.mz - m.lib_mz).abs() < 0.001 {
-                    match frag.annotation.ion_type {
-                        IonType::B => matched_b.push(frag.annotation.ordinal),
-                        IonType::Y => matched_y.push(frag.annotation.ordinal),
-                        _ => {}
-                    }
-                    break;
-                }
+            match m.ion_type {
+                IonType::B => matched_b.push(m.ordinal),
+                IonType::Y => matched_y.push(m.ordinal),
+                _ => {}
             }
         }
 
@@ -2261,6 +2275,7 @@ impl SpectralScorer {
                     lib_intensity: frag.relative_intensity,
                     obs_intensity: obs_intensity as f32,
                     ion_type: frag.annotation.ion_type,
+                    ordinal: frag.annotation.ordinal,
                 });
             }
         }
@@ -2508,6 +2523,12 @@ pub struct FragmentMatch {
     pub obs_intensity: f32,
     /// Ion type of the matched fragment (for hyperscore b/y counting)
     pub ion_type: IonType,
+    /// Ordinal of the matched fragment (e.g. 5 for b5/y5). Needed to attribute
+    /// the correct series position when two library fragments share a near-
+    /// identical m/z — previously `longest_consecutive_ions` reverse-looked-up
+    /// the library by m/z and broke on first hit, silently dropping the second
+    /// fragment's ordinal.
+    pub ordinal: u8,
 }
 
 /// Spectrum aggregator for combining spectra across peak apex region
