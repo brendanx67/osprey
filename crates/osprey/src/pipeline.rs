@@ -5289,7 +5289,7 @@ fn compute_features_at_peak(
                         apex_spectrum.scan_number, entry.modified_sequence
                     );
                     let _ = writeln!(f, "# nbins={} xcorr_scaled={}", pre_vec.len(), score.xcorr);
-                    let psum: f64 = pre_vec.iter().sum();
+                    let psum: f64 = pre_vec.iter().map(|&v| v as f64).sum();
                     let pnz = pre_vec.iter().filter(|&&v| v != 0.0).count();
                     let _ = writeln!(f, "# preprocessed_sum={} nonzero={}", psum, pnz);
                     // First 20 nonzero preprocessed bins
