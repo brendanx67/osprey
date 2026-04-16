@@ -5160,7 +5160,7 @@ struct FeatureComputeContext<'a> {
     /// Indexed by position in window_spectra (same order as window_pairs).
     /// When Some, enables O(n_frags) XCorr lookup instead of O(n_peaks) preprocessing per call.
     /// f64 for cross-implementation bit-identical alignment with C# (OspreySharp).
-    preprocessed_xcorr: Option<&'a [Vec<f64>]>,
+    preprocessed_xcorr: Option<&'a [Vec<f32>]>,
     /// For each spectrum in cand_spectra, its index into the window_spectra array.
     /// Used to look up pre-preprocessed XCorr data.
     cand_window_local: Option<&'a [usize]>,
@@ -5269,9 +5269,9 @@ fn compute_features_at_peak(
     {
         let mut score = ctx.scorer.lib_cosine(apex_spectrum, entry);
         let win_idx = win_indices[apex_local_idx];
-        let lib_preprocessed = ctx.scorer.preprocess_library_for_xcorr(entry);
+        let lib_preprocessed = ctx.scorer.preprocess_library_for_xcorr_f32(entry);
         score.xcorr =
-            SpectralScorer::xcorr_from_preprocessed(&preprocessed[win_idx], &lib_preprocessed);
+            SpectralScorer::xcorr_from_preprocessed_f32(&preprocessed[win_idx], &lib_preprocessed);
 
         // XCorr diagnostic for bisection
         if let Ok(diag_scan) = std::env::var("OSPREY_DIAG_XCORR_SCAN") {
@@ -5340,7 +5340,7 @@ fn compute_features_at_peak(
     let mut sg_cosine = 0.0;
     // Pre-compute library XCorr vector once for SG-weighted lookups
     let lib_xcorr_preprocessed = if ctx.preprocessed_xcorr.is_some() {
-        Some(ctx.scorer.preprocess_library_for_xcorr(entry))
+        Some(ctx.scorer.preprocess_library_for_xcorr_f32(entry))
     } else {
         None
     };
@@ -5355,7 +5355,7 @@ fn compute_features_at_peak(
             ) {
                 let win_idx = win_indices[idx as usize];
                 sg_xcorr +=
-                    SpectralScorer::xcorr_from_preprocessed(&preprocessed[win_idx], lib_pre)
+                    SpectralScorer::xcorr_from_preprocessed_f32(&preprocessed[win_idx], lib_pre)
                         * weight;
             } else {
                 sg_xcorr += ctx.scorer.xcorr_at_scan(spec, entry) * weight;
@@ -5951,9 +5951,9 @@ fn run_search(
                 // Each spectrum is preprocessed once here; per-entry scoring then uses
                 // O(n_frags) dot product lookups instead of O(n_peaks) re-preprocessing.
                 // f64 for cross-implementation bit-identical alignment with C#.
-                let preprocessed_xcorr: Vec<Vec<f64>> = window_spectra
+                let preprocessed_xcorr: Vec<Vec<f32>> = window_spectra
                     .iter()
-                    .map(|s| scorer.preprocess_spectrum_for_xcorr(s))
+                    .map(|s| scorer.preprocess_spectrum_for_xcorr_f32(s))
                     .collect();
 
                 // Find candidate library entries for this window using MzRTIndex
